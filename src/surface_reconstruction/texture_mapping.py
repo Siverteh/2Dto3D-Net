@@ -3,6 +3,7 @@ import open3d as o3d
 import cv2
 import math
 from collections import defaultdict
+from .mesh_generation import process_point_cloud_to_mesh
 
 def generate_uv_mapping(mesh):
     """
