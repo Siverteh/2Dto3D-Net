@@ -336,3 +336,4 @@ def fuse_depth_maps(depth_maps, confidence_maps):
     fused_depth[valid_mask] /= fused_confidence[valid_mask]
     
     return fused_depth, fused_confidence
+

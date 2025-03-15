@@ -2,6 +2,8 @@ import numpy as np
 from scipy.sparse import lil_matrix
 from scipy.optimize import least_squares
 import cv2
+# In bundle_adjustment.py
+from .triangulation import triangulate_all_points, merge_triangulated_points
 
 def rotate_points(points, rot_vecs):
     """
@@ -31,20 +33,24 @@ def project_points(points, camera_params, K):
     
     Args:
         points: Nx3 array of 3D points.
-        camera_params: Camera parameters (rotation vector and translation).
+        camera_params: (n_cameras, 6) array of camera parameters.
         K: Camera intrinsic matrix.
         
     Returns:
         Projected 2D points.
     """
-    n_cameras = camera_params.shape[0] // 6
+    n_cameras = camera_params.shape[0]
     n_points = points.shape[0]
     
     points_proj = np.zeros((n_cameras, n_points, 2))
     
     for i in range(n_cameras):
-        rot_vecs = camera_params[i*6:i*6+3].reshape(1, 3)
-        trans_vecs = camera_params[i*6+3:i*6+6].reshape(1, 3)
+        rot_vec = camera_params[i, :3]  # Get rotation vector for camera i
+        trans_vec = camera_params[i, 3:6]  # Get translation vector for camera i
+        
+        # Reshape for rotate_points function
+        rot_vecs = rot_vec.reshape(1, 3)
+        trans_vecs = trans_vec.reshape(1, 3)
         
         # Rotate points
         points_rot = rotate_points(points, rot_vecs)
@@ -61,7 +67,6 @@ def project_points(points, camera_params, K):
         points_proj[i, :, 1] = K[1, 1] * y + K[1, 2]
     
     return points_proj
-
 def reprojection_error(params, n_cameras, n_points, camera_indices, point_indices, points_2d, K):
     """
     Compute reprojection error.

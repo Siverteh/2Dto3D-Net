@@ -183,7 +183,7 @@ def pnp_absolute_pose(points_3d, points_2d, K, method=8):
 
 def estimate_poses_incremental(matches_dict, K, min_matches=20):
     """
-    Estimate camera poses incrementally starting from an initial pair.
+    Estimate camera poses incrementally starting from consecutive frames.
     
     Args:
         matches_dict: Dictionary mapping image pairs to matches.
@@ -193,23 +193,34 @@ def estimate_poses_incremental(matches_dict, K, min_matches=20):
     Returns:
         Dictionary of camera poses {image_name: (R, t)}.
     """
-    attempt_counter = {}  # Track failed attempts per image
-    max_attempts = 5     # Maximum attempts before giving up
+    # Sort image pairs by filename to ensure sequential processing
+    all_filenames = set()
+    for img1, img2 in matches_dict.keys():
+        all_filenames.add(img1)
+        all_filenames.add(img2)
     
-    # Sort image pairs by number of matches (descending)
-    sorted_pairs = sorted(matches_dict.keys(), 
-                          key=lambda pair: len(matches_dict[pair][2]), 
-                          reverse=True)
+    # Sort filenames to get sequential order
+    sorted_filenames = sorted(list(all_filenames))
     
-    # Check if we have any pairs with enough matches
-    if not sorted_pairs or len(matches_dict[sorted_pairs[0]][2]) < min_matches:
-        print("Error: Not enough matches for pose estimation.")
-        return {}
+    # Find consecutive image pairs for initialization
+    init_pair = None
+    for i in range(len(sorted_filenames) - 1):
+        pair = (sorted_filenames[i], sorted_filenames[i+1])
+        if pair in matches_dict and len(matches_dict[pair][2]) >= min_matches:
+            init_pair = pair
+            break
+            
+    if init_pair is None:
+        # Fall back to best matching pair if no good consecutive pairs
+        sorted_pairs = sorted(matches_dict.keys(), 
+                            key=lambda pair: len(matches_dict[pair][2]), 
+                            reverse=True)
+        init_pair = sorted_pairs[0]
     
-    # Start with the pair that has the most matches
-    init_pair = sorted_pairs[0]
     img1_name, img2_name = init_pair
     kp1, kp2, matches = matches_dict[init_pair]
+    
+    print(f"Initializing with pair: {img1_name} and {img2_name} ({len(matches)} matches)")
     
     # Estimate initial relative pose
     R_rel, t_rel = estimate_relative_pose(kp1, kp2, matches, K)
@@ -226,9 +237,13 @@ def estimate_poses_incremental(matches_dict, K, min_matches=20):
     
     # Track points that have been triangulated
     triangulated_points = {}
-    observation_map = {}  # Maps 3D point index to image and keypoint indices
+    point_index_counter = 0
     
-    # Triangulate initial points
+    # Create a more efficient observation map
+    # Maps (image_name, keypoint_idx) to 3D point index
+    observations_by_view = {}
+    
+    # Initial triangulation
     pts1 = np.float32([kp1[m.queryIdx].pt for m in matches])
     pts2 = np.float32([kp2[m.trainIdx].pt for m in matches])
     
@@ -240,149 +255,137 @@ def estimate_poses_incremental(matches_dict, K, min_matches=20):
     points_3d = points_4d[:3] / points_4d[3]
     points_3d = points_3d.T
     
-    # Store triangulated points and their observations
+    # Store initial triangulated points
     for i, (m, pt3d) in enumerate(zip(matches, points_3d)):
-        triangulated_points[i] = pt3d
+        # Check triangulation quality
+        pt_cam1 = pt3d  # Already in camera 1 frame
+        pt_cam2 = R_rel @ pt3d + t_rel
         
-        # Record observations
-        if i not in observation_map:
-            observation_map[i] = []
-        
-        observation_map[i].append((img1_name, m.queryIdx))
-        observation_map[i].append((img2_name, m.trainIdx))
+        # Only keep points in front of both cameras
+        if pt_cam1[2] > 0 and pt_cam2[2] > 0:
+            triangulated_points[point_index_counter] = pt3d
+            
+            # Add observations
+            observations_by_view[(img1_name, m.queryIdx)] = point_index_counter
+            observations_by_view[(img2_name, m.trainIdx)] = point_index_counter
+            
+            point_index_counter += 1
     
-    # Process remaining images
+    print(f"Triangulated {len(triangulated_points)} initial points")
+    
+    # Process remaining images SEQUENTIALLY
     processed_images = set([img1_name, img2_name])
     
-    while True:
-        # Find image pairs where one image is processed and one is not
-        next_pair = None
-        max_matches = 0
-        
-        for pair in sorted_pairs:
-            img_a, img_b = pair
+    # Attempt to add each image in sequence first
+    for img_name in sorted_filenames:
+        if img_name in processed_images:
+            continue
             
-            if img_a in processed_images and img_b not in processed_images:
-                if len(matches_dict[pair][2]) > max_matches:
-                    next_pair = pair
-                    max_matches = len(matches_dict[pair][2])
-            
-            elif img_b in processed_images and img_a not in processed_images:
-                if len(matches_dict[pair][2]) > max_matches:
-                    next_pair = (img_b, img_a)  # Swap to ensure processed image is first
-                    max_matches = len(matches_dict[pair][2])
+        print(f"Attempting to add image: {img_name}")
         
-        if next_pair is None or max_matches < min_matches:
-            break  # No more images to process
-        
-        # Extract information
-        known_img, new_img = next_pair
-        
-        # Track attempts for this image
-        if new_img not in attempt_counter:
-            attempt_counter[new_img] = 1
-        else:
-            attempt_counter[new_img] += 1
-            # Check if we've tried too many times with this image
-            if attempt_counter[new_img] > max_attempts:
-                print(f"Maximum attempts reached for {new_img}. Permanently skipping.")
-                processed_images.add(new_img)  # Mark as processed to avoid further attempts
-                continue
-        
-        if (known_img, new_img) in matches_dict:
-            kp_known, kp_new, matches = matches_dict[(known_img, new_img)]
-        else:
-            kp_new, kp_known, matches_rev = matches_dict[(new_img, known_img)]
-            # Convert matches from new->known to known->new
-            matches = [cv2.DMatch(m.trainIdx, m.queryIdx, m.distance) for m in matches_rev]
-        
-        # Find correspondences between new image and already triangulated points
+        # Find all matches between this image and already processed images
         points_3d = []
         points_2d = []
+        point_indices = []
         
-        for i, m in enumerate(matches):
-            # Find if this keypoint in the known image corresponds to a triangulated point
-            for pt_idx, observations in observation_map.items():
-                for obs_img, obs_kp_idx in observations:
-                    if obs_img == known_img and obs_kp_idx == m.queryIdx:
-                        # Found a correspondence
-                        points_3d.append(triangulated_points[pt_idx])
-                        points_2d.append(kp_new[m.trainIdx].pt)
-                        break
-        
-        if len(points_3d) < 6:
-            print(f"Warning: Not enough correspondences for {new_img}. Skipping.")
-            continue
-        
-        # Estimate pose using PnP
-        R_new, t_new, inliers = pnp_absolute_pose(points_3d, points_2d, K)
-        
-        if R_new is None or t_new is None:
-            print(f"Warning: Failed to estimate pose for {new_img}. Skipping.")
-            continue
-        
-        # Add new camera pose
-        camera_poses[new_img] = (R_new, t_new)
-        processed_images.add(new_img)
-        
-        print(f"Added pose for {new_img} using {len(inliers)} / {len(points_3d)} points")
-        
-        # Find new matches to triangulate
-        for pair in sorted_pairs:
+        # Collect 2D-3D correspondences
+        for pair in matches_dict.keys():
             img_a, img_b = pair
             
-            if img_a in processed_images and img_b in processed_images:
-                kp_a, kp_b, matches_ab = matches_dict[pair]
+            # Only use pairs where one image is processed and the other is the current target
+            if (img_a == img_name and img_b in processed_images) or (img_b == img_name and img_a in processed_images):
+                kp_a, kp_b, pair_matches = matches_dict[pair]
                 
-                # Add this check right here:
-                if img_a not in camera_poses or img_b not in camera_poses:
-                    continue  # Skip if either image doesn't have a camera pose
+                for match in pair_matches:
+                    if img_a == img_name:
+                        # Current image is img_a
+                        view_kp_idx = (img_b, match.trainIdx)
+                        query_kp = kp_a[match.queryIdx].pt
+                    else:
+                        # Current image is img_b
+                        view_kp_idx = (img_a, match.queryIdx)
+                        query_kp = kp_b[match.trainIdx].pt
                     
-                # Get camera poses
-                R_a, t_a = camera_poses[img_a]
-                R_b, t_b = camera_poses[img_b]
+                    # Check if this keypoint corresponds to a triangulated point
+                    if view_kp_idx in observations_by_view:
+                        pt_idx = observations_by_view[view_kp_idx]
+                        pt3d = triangulated_points[pt_idx]
+                        
+                        points_3d.append(pt3d)
+                        points_2d.append(query_kp)
+                        point_indices.append(pt_idx)
+        
+        print(f"Found {len(points_3d)} 2D-3D correspondences for {img_name}")
+        
+        # Allow as few as 4 correspondences (minimum for PnP)
+        if len(points_3d) >= 4:
+            # Estimate pose using PnP
+            R, t, inliers = pnp_absolute_pose(points_3d, points_2d, K)
+            
+            if R is not None and t is not None and len(inliers) >= 4:
+                camera_poses[img_name] = (R, t)
+                processed_images.add(img_name)
                 
-                # Create projection matrices
-                P_a = K @ np.hstack((R_a, t_a.reshape(3, 1)))
-                P_b = K @ np.hstack((R_b, t_b.reshape(3, 1)))
+                print(f"Added pose for {img_name} using {len(inliers)} / {len(points_3d)} points")
                 
-                # Extract matched points
-                pts_a = np.float32([kp_a[m.queryIdx].pt for m in matches_ab])
-                pts_b = np.float32([kp_b[m.trainIdx].pt for m in matches_ab])
-                
-                # Triangulate new points
-                points_4d = cv2.triangulatePoints(P_a, P_b, pts_a.T, pts_b.T)
-                new_points_3d = (points_4d[:3] / points_4d[3]).T
-                
-                # Add new triangulated points
-                start_idx = len(triangulated_points)
-                
-                for i, (m, pt3d) in enumerate(zip(matches_ab, new_points_3d)):
-                    # Skip if this match already has a triangulated point
-                    already_triangulated = False
-                    
-                    for observations in observation_map.values():
-                        for obs_img, obs_kp_idx in observations:
-                            if (obs_img == img_a and obs_kp_idx == m.queryIdx) or \
-                               (obs_img == img_b and obs_kp_idx == m.trainIdx):
-                                already_triangulated = True
-                                break
-                        if already_triangulated:
-                            break
-                    
-                    if already_triangulated:
+                # Triangulate new points with all processed cameras
+                for processed_img in processed_images:
+                    if processed_img == img_name:
                         continue
+                        
+                    pair = (img_name, processed_img) if (img_name, processed_img) in matches_dict else (processed_img, img_name)
                     
-                    # Add new triangulated point
-                    pt_idx = start_idx + i
-                    triangulated_points[pt_idx] = pt3d
-                    
-                    # Record observations
-                    if pt_idx not in observation_map:
-                        observation_map[pt_idx] = []
-                    
-                    observation_map[pt_idx].append((img_a, m.queryIdx))
-                    observation_map[pt_idx].append((img_b, m.trainIdx))
+                    if pair in matches_dict:
+                        kp_a, kp_b, pair_matches = matches_dict[pair]
+                        
+                        # Get camera poses
+                        R_a, t_a = camera_poses[pair[0]]
+                        R_b, t_b = camera_poses[pair[1]]
+                        
+                        # Create projection matrices
+                        P_a = K @ np.hstack((R_a, t_a.reshape(3, 1)))
+                        P_b = K @ np.hstack((R_b, t_b.reshape(3, 1)))
+                        
+                        # Extract matched points
+                        pts_a = np.float32([kp_a[m.queryIdx].pt for m in pair_matches])
+                        pts_b = np.float32([kp_b[m.trainIdx].pt for m in pair_matches])
+                        
+                        # Triangulate new points
+                        points_4d = cv2.triangulatePoints(P_a, P_b, pts_a.T, pts_b.T)
+                        new_points_3d = (points_4d[:3] / points_4d[3]).T
+                        
+                        # Add new triangulated points
+                        triangulated_count = 0
+                        
+                        for i, (match, pt3d) in enumerate(zip(pair_matches, new_points_3d)):
+                            # Convert to both camera coordinates to check if in front
+                            pt_in_cam_a = R_a.T @ (pt3d - t_a)
+                            pt_in_cam_b = R_b.T @ (pt3d - t_b)
+                            
+                            if pt_in_cam_a[2] <= 0 or pt_in_cam_b[2] <= 0:
+                                continue
+                                
+                            # Check if either observation already exists
+                            view_a = (pair[0], match.queryIdx)
+                            view_b = (pair[1], match.trainIdx)
+                            
+                            if view_a in observations_by_view or view_b in observations_by_view:
+                                continue
+                                
+                            # Add new point
+                            triangulated_points[point_index_counter] = pt3d
+                            observations_by_view[view_a] = point_index_counter
+                            observations_by_view[view_b] = point_index_counter
+                            point_index_counter += 1
+                            triangulated_count += 1
+                            
+                        print(f"  Triangulated {triangulated_count} new points with {pair[0]} and {pair[1]}")
+            else:
+                print(f"  PnP failed for {img_name}")
+        else:
+            print(f"  Not enough correspondences for {img_name}")
     
-    print(f"Estimated poses for {len(camera_poses)} cameras")
+    # Final statistics
+    print(f"Estimated poses for {len(camera_poses)}/{len(all_filenames)} cameras")
+    print(f"Total triangulated points: {len(triangulated_points)}")
     return camera_poses

@@ -37,8 +37,15 @@ def compute_triangulation_angle(pt3d, camera1_center, camera2_center):
     vec2 = camera2_center - pt3d
     
     # Normalize vectors
-    vec1 = vec1 / np.linalg.norm(vec1)
-    vec2 = vec2 / np.linalg.norm(vec2)
+    vec1_norm = np.linalg.norm(vec1)
+    vec2_norm = np.linalg.norm(vec2)
+    
+    # Avoid division by zero
+    if vec1_norm < 1e-10 or vec2_norm < 1e-10:
+        return 0.0
+        
+    vec1 = vec1 / vec1_norm
+    vec2 = vec2 / vec2_norm
     
     # Compute angle using dot product
     cos_angle = np.clip(np.dot(vec1, vec2), -1.0, 1.0)
@@ -108,10 +115,15 @@ def triangulate_all_points(camera_poses, feature_matches, K):
     point_colors = []  # List to store point colors (if available)
     point_observations = []  # List to store image observations for each point
     
+    print(f"Triangulating from {len(camera_poses)} camera poses and {len(feature_matches)} feature matches")
+    
     # Process each image pair
+    valid_pairs = 0
     for (img1_name, img2_name), (kp1, kp2, matches) in feature_matches.items():
         if img1_name not in camera_poses or img2_name not in camera_poses:
             continue
+            
+        valid_pairs += 1
         
         # Get camera poses
         R1, t1 = camera_poses[img1_name]
@@ -149,6 +161,12 @@ def triangulate_all_points(camera_poses, feature_matches, K):
             if error > 4.0:
                 continue
             
+            # Check if point is in front of both cameras
+            pt3d_in_cam1 = R1.T @ (pt3d - t1)
+            pt3d_in_cam2 = R2.T @ (pt3d - t2)
+            if pt3d_in_cam1[2] <= 0 or pt3d_in_cam2[2] <= 0:
+                continue
+                
             # Compute triangulation angle
             angle = compute_triangulation_angle(pt3d, camera1_center, camera2_center)
             
@@ -166,6 +184,7 @@ def triangulate_all_points(camera_poses, feature_matches, K):
             }
             point_observations.append(observations)
     
+    print(f"Found {valid_pairs} valid image pairs for triangulation")
     print(f"Triangulated {len(points_3d)} 3D points")
     return points_3d, point_observations
 

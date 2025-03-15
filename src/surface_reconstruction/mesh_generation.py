@@ -191,10 +191,10 @@ def alpha_shape_reconstruction(points, alpha=0.5):
     mesh.compute_vertex_normals()
     
     return mesh
-
 def clean_mesh(mesh, detail_level=5):
     """
     Clean mesh by removing isolated components, filling holes, etc.
+    Compatible with older versions of Open3D.
     
     Args:
         mesh: Open3D triangle mesh.
@@ -212,9 +212,21 @@ def clean_mesh(mesh, detail_level=5):
     # Remove degenerate triangles
     mesh.remove_degenerate_triangles()
     
-    # Remove isolated vertices
-    mesh.remove_vertices_by_mask(
-        mesh.get_vertex_degree() == 0)
+    # Alternative way to remove isolated vertices without using get_vertex_degree()
+    # Find vertices that are used in triangles
+    vertices = np.asarray(mesh.vertices)
+    triangles = np.asarray(mesh.triangles)
+    
+    if len(triangles) > 0:  # Only proceed if there are triangles
+        # Get unique vertices used in triangles
+        used_vertices = np.unique(triangles.flatten())
+        
+        # Create a mask for vertices (True = keep, False = remove)
+        vertex_mask = np.zeros(len(vertices), dtype=bool)
+        vertex_mask[used_vertices] = True
+        
+        # Invert the mask since remove_vertices_by_mask removes vertices where mask is True
+        mesh.remove_vertices_by_mask(~vertex_mask)
     
     # Remove non-manifold edges
     mesh.remove_non_manifold_edges()
@@ -222,15 +234,19 @@ def clean_mesh(mesh, detail_level=5):
     # Apply Taubin smoothing (maintains features better than Laplacian)
     lambda_factor = 0.5  # Positive scale factor
     mu_factor = -0.53    # Negative scale factor (slightly larger than -lambda)
-    num_iterations = 10  # Number of iteration steps
+    num_iterations = max(1, 10 // detail_level)  # Number of iteration steps
     
-    smoothed_mesh = mesh.filter_smooth_taubin(
-        number_of_iterations=num_iterations // detail_level,
-        lambda_filter=lambda_factor,
-        mu=mu_factor
-    )
-    
-    return smoothed_mesh
+    try:
+        smoothed_mesh = mesh.filter_smooth_taubin(
+            number_of_iterations=num_iterations,
+            lambda_filter=lambda_factor,
+            mu=mu_factor
+        )
+        return smoothed_mesh
+    except Exception as e:
+        print(f"Warning: Smoothing failed with error: {e}")
+        print("Returning unsmoothed mesh")
+        return mesh
 
 def simplify_mesh(mesh, target_reduction=0.5, quality=0.8):
     """
@@ -279,6 +295,7 @@ def fill_holes(mesh, hole_size=100):
 def process_point_cloud_to_mesh(points, colors=None, method='poisson', cleanup=True):
     """
     Process point cloud to mesh using specified method.
+    Enhanced to handle sparse point clouds better.
     
     Args:
         points: Nx3 array of points.
@@ -289,30 +306,91 @@ def process_point_cloud_to_mesh(points, colors=None, method='poisson', cleanup=T
     Returns:
         Triangle mesh.
     """
+    print(f"Starting mesh reconstruction from {len(points)} points using {method} method")
+    
     # Create point cloud
     pcd = create_point_cloud_from_points(points, colors)
     
-    # Remove outliers
-    pcd = remove_statistical_outliers(pcd)
-    
-    # Downsample for faster processing
-    pcd = downsample_point_cloud(pcd, voxel_size=0.005)
-    
-    # Estimate normals
-    pcd = estimate_point_normals(pcd)
-    
-    # Perform surface reconstruction
-    if method == 'poisson':
-        mesh = poisson_surface_reconstruction(pcd)
-    elif method == 'ball_pivoting':
-        mesh = ball_pivoting_surface_reconstruction(pcd)
-    elif method == 'alpha_shape':
-        mesh = alpha_shape_reconstruction(np.asarray(pcd.points))
+    # Remove outliers (use more conservative parameters for sparse clouds)
+    if len(points) > 1000:
+        print("Removing statistical outliers...")
+        pcd = remove_statistical_outliers(pcd, nb_neighbors=min(20, len(points)//50), std_ratio=2.5)
     else:
-        raise ValueError(f"Unsupported reconstruction method: {method}")
+        print("Point cloud too sparse for outlier removal, skipping this step")
+    
+    # Determine appropriate voxel size based on point cloud density
+    if len(points) > 10000:
+        voxel_size = 0.005
+    else:
+        # For sparse clouds, use larger voxel size to avoid over-decimation
+        voxel_size = 0.01
+    
+    # Only downsample if enough points
+    if len(points) > 5000:
+        print(f"Downsampling with voxel size {voxel_size}...")
+        pcd = downsample_point_cloud(pcd, voxel_size=voxel_size)
+    else:
+        print("Point cloud too sparse for downsampling, skipping this step")
+    
+    # Estimate normals (adjust parameters for sparse clouds)
+    print("Estimating normals...")
+    if len(points) < 1000:
+        # For very sparse clouds, use larger radius to capture enough neighbors
+        radius = 0.2
+        max_nn = min(30, len(points)//3)
+    else:
+        radius = 0.1
+        max_nn = 30
+        
+    pcd = estimate_point_normals(pcd, radius=radius, max_nn=max_nn)
+    
+    try:
+        # Perform surface reconstruction with method-specific adjustments
+        if method == 'poisson':
+            # For sparse clouds, use lower depth to avoid artifacts
+            depth = 8 if len(points) > 5000 else 7
+            print(f"Performing Poisson reconstruction with depth={depth}...")
+            mesh = poisson_surface_reconstruction(pcd, depth=depth, scale=1.5)
+        elif method == 'ball_pivoting':
+            print("Performing Ball Pivoting reconstruction...")
+            # For sparse clouds, use larger ball radius
+            distances = pcd.compute_nearest_neighbor_distance()
+            avg_dist = np.mean(distances)
+            radii = [avg_dist * 2, avg_dist * 4, avg_dist * 8]
+            mesh = ball_pivoting_surface_reconstruction(pcd, radii=radii)
+        elif method == 'alpha_shape':
+            print("Performing Alpha Shape reconstruction...")
+            # Alpha shape often works better for sparse reconstruction
+            alpha = 0.5 if len(points) > 5000 else 0.3  # Lower alpha for sparse clouds
+            mesh = alpha_shape_reconstruction(np.asarray(pcd.points), alpha=alpha)
+        else:
+            raise ValueError(f"Unsupported reconstruction method: {method}")
+    except Exception as e:
+        print(f"Error during {method} reconstruction: {e}")
+        print("Falling back to Ball Pivoting method...")
+        try:
+            distances = pcd.compute_nearest_neighbor_distance()
+            avg_dist = np.mean(distances)
+            radii = [avg_dist * 2, avg_dist * 4, avg_dist * 8]
+            mesh = ball_pivoting_surface_reconstruction(pcd, radii=radii)
+        except Exception as e2:
+            print(f"Ball Pivoting also failed: {e2}")
+            print("Creating a simple convex hull as fallback...")
+            mesh = o3d.geometry.TriangleMesh.create_from_point_cloud_alpha_shape(pcd, 0.1)
+    
+    # Check if mesh is empty
+    if len(mesh.vertices) == 0 or len(mesh.triangles) == 0:
+        print("Warning: Reconstruction produced an empty mesh!")
+        print("Creating a simple convex hull as fallback...")
+        try:
+            mesh = o3d.geometry.TriangleMesh.create_from_point_cloud_alpha_shape(pcd, 0.1)
+        except:
+            print("Failed to create even a convex hull. Returning empty mesh.")
     
     # Clean up mesh if requested
-    if cleanup:
-        mesh = clean_mesh(mesh)
+    if cleanup and len(mesh.triangles) > 0:
+        print("Cleaning up mesh...")
+        mesh = clean_mesh(mesh, detail_level=3)  # Use updated clean_mesh function
     
+    print(f"Mesh reconstruction complete: {len(mesh.vertices)} vertices, {len(mesh.triangles)} triangles")
     return mesh, pcd
