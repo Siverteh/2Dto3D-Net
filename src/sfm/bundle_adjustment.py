@@ -249,7 +249,7 @@ def prepare_bundle_adjustment_data(camera_poses, feature_matches, K, min_observa
     
     return merged_points, merged_observations
 
-def run_global_ba(camera_poses, feature_matches, K):
+def run_global_ba(camera_poses, feature_matches, K, iterations=100):
     """
     Run global bundle adjustment.
     
@@ -265,6 +265,6 @@ def run_global_ba(camera_poses, feature_matches, K):
     points_3d, point_observations = prepare_bundle_adjustment_data(camera_poses, feature_matches, K)
     
     # Run bundle adjustment
-    refined_poses, refined_points = perform_bundle_adjustment(camera_poses, points_3d, point_observations, K)
+    refined_poses, refined_points = perform_bundle_adjustment(camera_poses, points_3d, point_observations, K, iterations)
     
     return refined_poses, refined_points, point_observations

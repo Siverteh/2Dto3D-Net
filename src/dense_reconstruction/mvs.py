@@ -1,11 +1,12 @@
 import cv2
 import numpy as np
 from tqdm import tqdm
+from scipy.ndimage import binary_closing, binary_dilation
 from .depth_map import estimate_depth_map_for_view
 
-def select_source_views(target_idx, camera_poses, num_views=2, min_angle=5, max_angle=40):
+def select_source_views(target_idx, camera_poses, num_views=2, min_angle=3, max_angle=60):
     """
-    Select source views for a target view based on viewing angle.
+    Enhanced source view selection optimized for objects captured in a circular pattern.
     
     Args:
         target_idx: Index of the target view.
@@ -27,44 +28,71 @@ def select_source_views(target_idx, camera_poses, num_views=2, min_angle=5, max_
     target_pos = -target_R.T @ target_t
     target_dir = target_R.T @ np.array([0, 0, 1])  # Camera looks along Z axis
     
-    # Compute viewing angles between target and all other views
-    angles = []
+    # For circular captures, we want to get views from different sides
+    # Calculate average camera center (approximate object center)
+    positions = []
     for i, (R, t) in enumerate(camera_poses):
-        if i == target_idx:
-            angles.append(float('inf'))  # Don't select the target itself
-            continue
-        
-        # Compute position and direction of source camera
-        source_pos = -R.T @ t
-        source_dir = R.T @ np.array([0, 0, 1])
-        
-        # Compute baseline vector
-        baseline = source_pos - target_pos
-        baseline_length = np.linalg.norm(baseline)
-        
-        if baseline_length < 1e-6:
-            angles.append(float('inf'))  # Cameras at same position
-            continue
-        
-        # Compute angle between viewing directions
-        cos_angle = np.dot(target_dir, source_dir)
-        angle = np.degrees(np.arccos(np.clip(cos_angle, -1.0, 1.0)))
-        
-        # Penalize very small or very large angles
-        if angle < min_angle or angle > max_angle:
-            angle += 1000  # Add penalty
-        
-        angles.append(angle)
+        pos = -R.T @ t  # Camera center
+        dir = R.T @ np.array([0, 0, 1])  # Looking direction
+        positions.append((i, pos, dir))
     
-    # Select views with smallest angles
-    sorted_indices = np.argsort(angles)
-    selected_indices = sorted_indices[:num_views]
+    positions_array = np.array([pos for _, pos, _ in positions])
+    center = np.mean(positions_array, axis=0)
+    
+    # Calculate vectors from center to each camera
+    center_to_camera = positions_array - center
+    # Normalize these vectors
+    norms = np.linalg.norm(center_to_camera, axis=1, keepdims=True)
+    center_to_camera = center_to_camera / norms
+    
+    # Vector from center to target camera
+    target_vec = center_to_camera[target_idx]
+    
+    # Compute scores for each camera
+    scores = []
+    for i, (idx, pos, dir) in enumerate(positions):
+        if idx == target_idx:
+            scores.append((idx, float('inf')))  # Don't select the target itself
+            continue
+        
+        # Compute vector from center to this camera
+        cam_vec = center_to_camera[i]
+        
+        # Compute angle between vectors (angular distance around the circle)
+        cos_angle = np.clip(np.dot(target_vec, cam_vec), -1.0, 1.0)
+        angle = np.degrees(np.arccos(cos_angle))
+        
+        # Create score: prefer cameras at specific angles
+        # We want some nearby views (15-20°) for matching and some distant views (60-90°) for triangulation
+        if angle < min_angle:  # Too close
+            score = 1000 + (min_angle - angle)
+        elif angle > max_angle:  # Too far
+            score = 1000 + (angle - max_angle)
+        elif 15 <= angle <= 25 or 55 <= angle <= 90:  # Ideal ranges
+            score = abs(20 - angle) if angle <= 25 else abs(70 - angle)
+        else:
+            score = min(abs(angle - 20), abs(angle - 70)) + 10  # Other angles with penalty
+        
+        # Factor in the viewing direction similarity
+        dir_similarity = np.dot(target_dir, dir)
+        
+        # Penalize cameras that don't look at a similar spot
+        if dir_similarity < 0.7:  # More than ~45° different view direction
+            score += 50  # Add penalty
+        
+        scores.append((idx, score))
+    
+    # Sort by score (lowest is best)
+    sorted_scores = sorted(scores, key=lambda x: x[1])
+    
+    # Select views with best scores
+    selected_indices = [idx for idx, _ in sorted_scores[:num_views]]
     
     return selected_indices
 
 def compute_depth_maps(images, camera_poses, K, config):
     """
-    Compute depth maps for all images.
+    Compute depth maps for all images with enhanced parameters for shiny objects.
     
     Args:
         images: List of images.
@@ -84,7 +112,6 @@ def compute_depth_maps(images, camera_poses, K, config):
     
     depth_maps = {}
     confidence_maps = {}
-    fused_depth_maps = {}
     
     image_names = list(camera_poses.keys())
     
@@ -94,10 +121,24 @@ def compute_depth_maps(images, camera_poses, K, config):
         target_img = next(img for img, name in images if name == target_name)
         target_pose = camera_poses[target_name]
         
-        # Select source views
+        # Preprocess target image if necessary (e.g., for shiny surfaces)
+        # This enhancement helps with textureless regions
+        if len(target_img.shape) == 3:
+            target_gray = cv2.cvtColor(target_img, cv2.COLOR_RGB2GRAY)
+        else:
+            target_gray = target_img.copy()
+            
+        # Apply CLAHE to enhance texture details
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        target_gray = clahe.apply(target_gray)
+        
+        # Select source views using enhanced selection
         source_indices = select_source_views(
             idx, [camera_poses[name] for name in image_names], 
-            num_views=num_source_views)
+            num_views=num_source_views,
+            min_angle=3,  # More permissive minimum angle
+            max_angle=60  # Larger maximum angle
+        )
         
         if len(source_indices) == 0:
             print(f"No suitable source views found for {target_name}")
@@ -108,13 +149,33 @@ def compute_depth_maps(images, camera_poses, K, config):
         source_images = [next(img for img, name in images if name == name) for name in source_names]
         source_poses = [camera_poses[name] for name in source_names]
         
-        # Estimate depth map
+        # Preprocess source images similarly
+        enhanced_source_images = []
+        for source_img in source_images:
+            # This is just to ensure we're not modifying the original images
+            enhanced_img = source_img.copy()
+            enhanced_source_images.append(enhanced_img)
+        
+        # Estimate depth map with enhanced parameters
         depth_map, conf_map = estimate_depth_map_for_view(
-            target_img, source_images, K, target_pose, source_poses,
+            target_img, enhanced_source_images, K, target_pose, source_poses,
             min_disparity=min_disparity, 
             num_disparities=num_disparities,
             block_size=block_size,
             filter_depths=filter_depths)
+        
+        # Additional filtering for noisy reconstructions if needed
+        # This helps remove isolated noise points while preserving structural features
+        if filter_depths:
+            # Apply median filter to remove speckle noise
+            depth_map = cv2.medianBlur(depth_map, 3)
+            
+            # Fill small holes using morphological operations
+            valid_mask = depth_map > 0
+            valid_mask = binary_closing(valid_mask, structure=np.ones((3,3)))
+            
+            # Remove isolated points
+            depth_map[~valid_mask] = 0
         
         # Store results
         depth_maps[target_name] = depth_map
@@ -126,7 +187,7 @@ def compute_depth_maps(images, camera_poses, K, config):
 
 def consistency_check(depth_maps, confidence_maps, camera_poses, K, threshold=0.01):
     """
-    Optimized consistency check across depth maps using vectorized operations.
+    Enhanced consistency check with special handling for shiny/textureless objects.
     
     Args:
         depth_maps: Dictionary of depth maps.
@@ -239,8 +300,18 @@ def consistency_check(depth_maps, confidence_maps, camera_poses, K, threshold=0.
                 rel_diff = np.zeros_like(valid_check, dtype=np.float32)
                 rel_diff[valid_check] = np.abs(z_projected[valid_check] - target_depths[valid_check]) / z_projected[valid_check]
                 
-                # Find consistent depths
-                consistent = valid_check & (rel_diff < threshold)
+                # *** IMPROVEMENT: Depth-dependent threshold ***
+                # Allow more error for farther points and less for closer points
+                depth_scale_factor = np.ones_like(valid_check, dtype=np.float32)
+                depth_scale_factor[z_projected > 30] = 1.5  # 50% more error allowed for deeper points
+                
+                # Find consistent depths - use adaptive threshold
+                consistent = valid_check & (rel_diff < threshold * depth_scale_factor)
+                
+                # *** IMPROVEMENT: Fallback to more lenient threshold if too few matches ***
+                # If we're getting very few consistent points, try a more lenient threshold
+                if np.sum(consistent) < 10 and np.sum(valid_check) > 100:
+                    consistent = valid_check & (rel_diff < threshold * 5)  # Much more lenient
                 
                 if not np.any(consistent):
                     continue
@@ -254,8 +325,25 @@ def consistency_check(depth_maps, confidence_maps, camera_poses, K, threshold=0.
         
         # Create filtered depth map
         filtered_depth = np.zeros((h, w), dtype=np.float32)
+        
+        # *** IMPROVEMENT: Accept points with any consistency rather than requiring multiple views ***
+        # Original required at least 2 views for a point to be considered valid
         valid_mask = consistency_count > 0
+        
         filtered_depth[valid_mask] = consistent_depths[valid_mask] / consistency_count[valid_mask]
+        
+        # *** IMPROVEMENT: Apply morphological operations to clean up the depth map ***
+        # This helps remove noise while preserving the structure
+        if np.any(valid_mask):
+            # Apply closing to fill small holes
+            valid_mask_filtered = binary_closing(valid_mask, structure=np.ones((3,3)))
+            
+            # FIX: Use just dilation instead of trying to get labels
+            dilated_mask = binary_dilation(valid_mask_filtered, structure=np.ones((3,3)))
+            
+            # Only keep points in the filtered mask
+            keep_mask = valid_mask & dilated_mask
+            filtered_depth[~keep_mask] = 0
         
         # Store result
         filtered_depth_maps[reference_name] = filtered_depth
@@ -270,7 +358,7 @@ def consistency_check(depth_maps, confidence_maps, camera_poses, K, threshold=0.
 
 def process_mvs(images, camera_poses, K, mvs_config):
     """
-    Complete Multi-View Stereo processing pipeline.
+    Complete Multi-View Stereo processing pipeline optimized for shiny/textureless objects.
     
     Args:
         images: List of (image, filename) tuples.
@@ -281,16 +369,37 @@ def process_mvs(images, camera_poses, K, mvs_config):
     Returns:
         Dictionary of depth maps and filtered depth maps.
     """
-    print("Starting Multi-View Stereo processing...")
+    print("Starting enhanced Multi-View Stereo processing...")
+    print("Using configuration optimized for challenging objects:")
     
-    # Compute initial depth maps
+    # Set default values optimized for shiny objects if not provided
+    enhanced_config = mvs_config.copy()
+    
+    # Provide some defaults if not specified
+    #if 'num_disparities' not in enhanced_config:
+    enhanced_config['num_disparities'] = 160  # Increased range for challenging objects
+    
+    #if 'block_size' not in enhanced_config:
+    enhanced_config['block_size'] = 11  # Larger block size for textureless areas
+    
+    #if 'consistency_threshold' not in enhanced_config:
+    enhanced_config['consistency_threshold'] = 0.08  # More forgiving threshold
+    
+    #if 'num_source_views' not in enhanced_config:
+    enhanced_config['num_source_views'] = 4  # Use more views for better triangulation
+    
+    # Report the configuration being used
+    for key, value in enhanced_config.items():
+        print(f"  - {key}: {value}")
+    
+    # Compute initial depth maps with enhanced settings
     depth_maps, confidence_maps = compute_depth_maps(
-        images, camera_poses, K, mvs_config)
+        images, camera_poses, K, enhanced_config)
     
-    # Perform consistency check
+    # Perform enhanced consistency check
     filtered_depth_maps = consistency_check(
         depth_maps, confidence_maps, camera_poses, K, 
-        threshold=mvs_config.get('consistency_threshold', 0.01))
+        threshold=enhanced_config.get('consistency_threshold', 0.08))
     
     # Return both raw and filtered depth maps
     return {

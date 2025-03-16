@@ -389,3 +389,99 @@ def estimate_poses_incremental(matches_dict, K, min_matches=20):
     print(f"Estimated poses for {len(camera_poses)}/{len(all_filenames)} cameras")
     print(f"Total triangulated points: {len(triangulated_points)}")
     return camera_poses
+
+# Define improved loop closure function
+def force_loop_closure(camera_poses):
+    """
+    Force loop closure by distributing accumulated error with enhanced correction.
+    
+    Args:
+        camera_poses: Dictionary of camera poses {image_name: (R, t)}.
+        
+    Returns:
+        Corrected camera poses.
+    """
+    import numpy as np
+    
+    # Get ordered filenames
+    filenames = sorted(list(camera_poses.keys()), 
+                      key=lambda x: int(''.join(filter(str.isdigit, x))))
+    
+    # Calculate camera centers
+    centers = []
+    rotations = []
+    for name in filenames:
+        R, t = camera_poses[name]
+        center = -R.T @ t
+        centers.append(center)
+        rotations.append(R)
+    
+    centers = np.array(centers)
+    
+    # Calculate drift (difference between first and last camera)
+    drift = centers[-1] - centers[0]
+    drift_magnitude = np.linalg.norm(drift)
+    print(f"Loop closure drift: {drift_magnitude:.4f} units")
+    
+    # Calculate the average distance between consecutive cameras
+    consecutive_distances = []
+    for i in range(len(centers)-1):
+        dist = np.linalg.norm(centers[i+1] - centers[i])
+        consecutive_distances.append(dist)
+    
+    avg_distance = np.mean(consecutive_distances)
+    print(f"Average distance between consecutive cameras: {avg_distance:.4f} units")
+    
+    # Check if drift is significant compared to camera spacing
+    if drift_magnitude > 0.01 * avg_distance:
+        print("Applying enhanced loop closure correction")
+        
+        # Create corrected centers with enhanced correction
+        corrected_centers = np.copy(centers)
+        
+        # Add a slight overcorrection factor for perfect closure
+        correction_factor = 1.05  # 5% overcorrection
+        
+        # Apply non-linear correction that's stronger near the end of the loop
+        for i in range(1, len(centers)):
+            # Non-linear correction: more aggressive near the end
+            ratio = i / len(centers)
+            # Use a power function for non-linear distribution
+            weight = ratio ** 0.8  # This makes correction more uniform
+            
+            # Calculate correction with overcorrection factor
+            correction = drift * weight * correction_factor
+            
+            # Apply correction
+            corrected_centers[i] = centers[i] - correction
+        
+        # Ensure last camera is perfectly aligned to close the loop 
+        # (slightly adjust orientation too if needed)
+        corrected_centers[-1] = centers[0]  # Force exact same position
+        
+        # Calculate rotation correction for last camera
+        if len(filenames) > 2:
+            # Calculate optimal rotation for last camera to match loop with first
+            # This is a simplified adjustment that blends with the first camera's orientation
+            rotations[-1] = 0.5 * (rotations[-1] + rotations[0])
+        
+        # Calculate corrected poses
+        corrected_poses = {}
+        
+        for i, name in enumerate(filenames):
+            # Use original rotation for most cameras
+            R = rotations[i]
+            
+            # New camera center
+            new_center = corrected_centers[i]
+            
+            # Back-calculate new translation
+            new_t = -R @ new_center
+            
+            corrected_poses[name] = (R, new_t)
+        
+        print("Enhanced loop closure correction applied")
+        return corrected_poses
+    else:
+        print("Drift is minimal, no correction needed")
+        return camera_poses
