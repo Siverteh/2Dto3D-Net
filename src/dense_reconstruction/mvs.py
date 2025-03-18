@@ -375,19 +375,6 @@ def process_mvs(images, camera_poses, K, mvs_config):
     # Set default values optimized for shiny objects if not provided
     enhanced_config = mvs_config.copy()
     
-    # Provide some defaults if not specified
-    #if 'num_disparities' not in enhanced_config:
-    enhanced_config['num_disparities'] = 160  # Increased range for challenging objects
-    
-    #if 'block_size' not in enhanced_config:
-    enhanced_config['block_size'] = 11  # Larger block size for textureless areas
-    
-    #if 'consistency_threshold' not in enhanced_config:
-    enhanced_config['consistency_threshold'] = 0.08  # More forgiving threshold
-    
-    #if 'num_source_views' not in enhanced_config:
-    enhanced_config['num_source_views'] = 4  # Use more views for better triangulation
-    
     # Report the configuration being used
     for key, value in enhanced_config.items():
         print(f"  - {key}: {value}")

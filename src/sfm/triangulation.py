@@ -98,7 +98,7 @@ def filter_triangulated_points(points_3d, errors, threshold=4.0):
     
     return filtered_points
 
-def triangulate_all_points(camera_poses, feature_matches, K):
+def triangulate_all_points(camera_poses, feature_matches, K, min_angle_deg=3.0, max_reproj_error=4.0):
     """
     Triangulate points across multiple views.
     
@@ -106,6 +106,8 @@ def triangulate_all_points(camera_poses, feature_matches, K):
         camera_poses: Dictionary of camera poses {image_name: (R, t)}.
         feature_matches: Dictionary of feature matches {(img1, img2): (kp1, kp2, matches)}.
         K: Camera intrinsic matrix.
+        min_angle_deg: Minimum triangulation angle in degrees (default: 3.0).
+        max_reproj_error: Maximum reprojection error in pixels (default: 4.0).
         
     Returns:
         Dictionary of 3D points and their observations.
@@ -158,7 +160,7 @@ def triangulate_all_points(camera_poses, feature_matches, K):
         # Add points and their observations
         for i, (pt3d, error) in enumerate(zip(points_3d_pair, avg_errors)):
             # Skip points with high reprojection error
-            if error > 4.0:
+            if error > max_reproj_error:
                 continue
             
             # Check if point is in front of both cameras
@@ -171,7 +173,7 @@ def triangulate_all_points(camera_poses, feature_matches, K):
             angle = compute_triangulation_angle(pt3d, camera1_center, camera2_center)
             
             # Skip points with small triangulation angle (potentially unstable)
-            if angle < 3.0 or angle > 175.0:
+            if angle < min_angle_deg or angle > 175.0:
                 continue
             
             # Add the 3D point
