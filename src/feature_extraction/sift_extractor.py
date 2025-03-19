@@ -37,7 +37,7 @@ def extract_sift_features(image, n_features=2000, contrast_threshold=0.01, edge_
     
     return keypoints, descriptors
 
-def extract_grid_sift_features(image, n_features=2000, grid_size=4):
+def extract_grid_sift_features(image, n_features=2000, grid_size=4, contrast_threshold=0.008):
     """
     Extract SIFT features evenly across the image using a grid-based approach.
     
@@ -45,6 +45,7 @@ def extract_grid_sift_features(image, n_features=2000, grid_size=4):
         image: Input image.
         n_features: Target total number of features.
         grid_size: Number of grid cells in each dimension.
+        contrast_threshold: Lower value gets more features in low-contrast regions.
         
     Returns:
         Combined keypoints and descriptors from all grid cells.
@@ -89,10 +90,10 @@ def extract_grid_sift_features(image, n_features=2000, grid_size=4):
             if np.sum(combined_mask) / 255 < 100:  # Fewer than 100 white pixels
                 continue
             
-            # Create SIFT detector for this cell
+            # Create SIFT detector for this cell with lower threshold
             cell_sift = cv2.SIFT_create(
                 nfeatures=features_per_cell,
-                contrastThreshold=0.01,
+                contrastThreshold=contrast_threshold,  # Use passed threshold
                 edgeThreshold=15
             )
             
@@ -110,7 +111,7 @@ def extract_grid_sift_features(image, n_features=2000, grid_size=4):
     if len(all_keypoints) < n_features // 2:
         extra_sift = cv2.SIFT_create(
             nfeatures=n_features - len(all_keypoints),
-            contrastThreshold=0.008,  # Even lower threshold to get more features
+            contrastThreshold=contrast_threshold * 0.5,  # Even lower threshold for extra features
             edgeThreshold=20
         )
         
@@ -125,7 +126,7 @@ def extract_grid_sift_features(image, n_features=2000, grid_size=4):
     
     return all_keypoints, all_descriptors
 
-def extract_multiscale_sift_features(image, n_features=2000, scales=[0.5, 0.75, 1.5, 2.0]):
+def extract_multiscale_sift_features(image, n_features=2000, scales=[0.5, 0.75, 1.0, 1.5, 2.0], contrast_threshold=0.006):
     """
     Extract SIFT features at multiple scales for better coverage.
     
@@ -133,6 +134,7 @@ def extract_multiscale_sift_features(image, n_features=2000, scales=[0.5, 0.75, 
         image: Input image.
         n_features: Target number of features per scale.
         scales: List of scale factors to use.
+        contrast_threshold: Lower value gets more features in low-contrast regions.
         
     Returns:
         Combined keypoints and descriptors from all scales.
@@ -148,10 +150,10 @@ def extract_multiscale_sift_features(image, n_features=2000, scales=[0.5, 0.75, 
     all_keypoints = []
     all_descriptors = []
     
-    # Create SIFT detector
+    # Create SIFT detector with lower threshold
     sift = cv2.SIFT_create(
         nfeatures=n_features,
-        contrastThreshold=0.01,
+        contrastThreshold=contrast_threshold,  # Use passed threshold
         edgeThreshold=15
     )
     
@@ -194,7 +196,7 @@ def extract_multiscale_sift_features(image, n_features=2000, scales=[0.5, 0.75, 
     
     return all_keypoints, all_descriptors
 
-def extract_features_from_image_set(images, method='sift', n_features=2000, contrast_threshold=0.009):
+def extract_features_from_image_set(images, method='sift', n_features=2000, contrast_threshold=0.003):
     """
     Extract features from a list of images with improved extraction strategies.
     
@@ -202,11 +204,16 @@ def extract_features_from_image_set(images, method='sift', n_features=2000, cont
         images: List of (image, filename) tuples.
         method: Feature extraction method ('sift', 'surf', or 'orb').
         n_features: Maximum number of features per image.
+        contrast_threshold: Lower value gets more features (0.003 recommended for full coverage).
         
     Returns:
         Dictionary mapping filenames to (keypoints, descriptors) tuples.
     """
     features_dict = {}
+    
+    # Even lower thresholds for grid and multiscale methods to ensure comprehensive coverage
+    grid_threshold = contrast_threshold * 0.8     # Slightly lower for grid-based
+    multiscale_threshold = contrast_threshold * 0.6  # Even lower for multiscale
     
     for img, filename in images:
         if method.lower() == 'sift':
@@ -216,13 +223,15 @@ def extract_features_from_image_set(images, method='sift', n_features=2000, cont
             keypoints1, descriptors1 = extract_sift_features(img, n_features=n_features//2, 
                                                           contrast_threshold=contrast_threshold)
             
-            # 2. Grid-based extraction
+            # 2. Grid-based extraction with lower threshold
             keypoints2, descriptors2 = extract_grid_sift_features(img, n_features=n_features//2, 
-                                                              grid_size=5)
+                                                              grid_size=5,
+                                                              contrast_threshold=grid_threshold)
             
-            # 3. Multi-scale extraction
+            # 3. Multi-scale extraction with lowest threshold
             keypoints3, descriptors3 = extract_multiscale_sift_features(img, n_features=n_features//3,
-                                                                    scales=[0.5, 0.75, 1.5, 2.0])
+                                                                    scales=[0.5, 0.75, 1.0, 1.5, 2.0],
+                                                                    contrast_threshold=multiscale_threshold)
             
             # Combine all keypoints - ensure they're lists
             keypoints = list(keypoints1) if isinstance(keypoints1, tuple) else list(keypoints1)

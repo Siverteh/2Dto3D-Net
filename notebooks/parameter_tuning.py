@@ -12,6 +12,10 @@ import datetime
 import copy
 import json
 from pathlib import Path
+import random
+random.seed(42)
+np.random.seed(42)
+cv2.setRNGSeed(42)
 
 # Add the project directory to the Python path
 sys.path.append('..')
@@ -106,20 +110,20 @@ base_config = {
 hyperparameter_grid = {
     'features': {
         'method': ['sift'],  
-        'max_features': [10000, 30000, 50000],
-        'contrast_threshold': [0.005, 0.01, 0.015]
+        'max_features': [50000],
+        'contrast_threshold': [0.015, 0.01, 0.05, 0.001]
     },
     'matching': {
-        'ratio_threshold': [0.65, 0.75, 0.85],
-        'min_matches': [10, 16, 22]
+        'ratio_threshold': [0.65, 0.75, 0.8, 0.85],
+        'min_matches': [10, 14, 18, 22, 26]
     },
     'calibration': {
-        'focal_length_factor': [1.3]
+        'focal_length_factor': [1.1, 1.3]
     },
     'sfm': {
-        'min_triangulation_angle_deg': [2.0, 3.0, 4.0],  # Lower = more points but less stable depth
-        'max_reprojection_error': [3.0, 4.0, 5.0],       # Higher = more points but might include errors
-        'merge_threshold': [0.001, 0.005, 0.01]          # For merge_triangulated_points
+        'min_triangulation_angle_deg': [2.0],  # Lower = more points but less stable depth
+        'max_reprojection_error': [3.0],       # Higher = more points but might include errors
+        'merge_threshold': [0.001]          # For merge_triangulated_points
     }
 }
 
@@ -254,14 +258,16 @@ def run_reconstruction(config, dataset_path_black, dataset_path_original, output
         # Extract features using the exact pattern from the original code
         feature_method = config['features']['method']
         max_features = config['features']['max_features']
+
+        contrast_threshold = config['features']['contrast_threshold']
         
         # Extract features exactly as in the original code
         if feature_method.lower() == 'sift':
             print(f"Using SIFT extraction with target of {max_features} features per image")
-            features_dict = extract_features_from_image_set(black_images, method=feature_method, n_features=max_features)
+            features_dict = extract_features_from_image_set(black_images, method=feature_method, n_features=max_features, contrast_threshold=contrast_threshold)
         else:
             # For other methods, use standard extraction
-            features_dict = extract_features_from_image_set(black_images, method=feature_method, n_features=max_features)
+            features_dict = extract_features_from_image_set(black_images, method=feature_method, n_features=max_features, contrast_threshold=contrast_threshold)
         
         # Count features
         total_features = sum(len(keypoints) for keypoints, _ in features_dict.values())
@@ -349,103 +355,6 @@ def run_reconstruction(config, dataset_path_black, dataset_path_original, output
             
             results['metrics']['camera_plot_path'] = camera_plot_path
             
-            # Also save the 3D point cloud if available
-            if points_3d and len(points_3d) > 0:
-                # Create a static plot of the point cloud (top view)
-                plt.figure(figsize=(12, 10))
-                points_array = np.array(points_3d)
-                plt.scatter(points_array[:, 0], points_array[:, 1], s=1, alpha=0.5, c='blue')
-                plt.scatter(centers[:, 0], centers[:, 1], c='r', marker='o', s=50)
-                plt.title(f"Sparse 3D Reconstruction: {len(points_array)} points (Top View)\n{param_summary}")
-                plt.xlabel('X')
-                plt.ylabel('Y')
-                plt.grid(True)
-                
-                point_cloud_path = os.path.join(config_output_dir, f"sparse_cloud_{param_filename}.png")
-                plt.savefig(point_cloud_path, dpi=300)
-                plt.close()
-                
-                results['metrics']['point_cloud_plot_path'] = point_cloud_path
-        
-        # Step 6: Triangulate 3D points
-        points_3d, point_observations = triangulate_all_points(
-            camera_poses, 
-            matches_dict, 
-            K,
-            min_angle_deg=config['sfm']['min_triangulation_angle_deg'],
-            max_reproj_error=config['sfm']['max_reprojection_error']
-        )
-        
-        num_triangulated_points = len(points_3d)
-        print(f"Triangulated {num_triangulated_points} 3D points.")
-        results['metrics']['triangulated_points'] = num_triangulated_points
-        
-        # Merge close points
-        merged_points, merged_observations = merge_triangulated_points(
-            points_3d, 
-            point_observations, 
-            threshold=config['sfm']['merge_threshold']
-        )
-        
-        num_merged_points = len(merged_points)
-        print(f"After merging: {num_merged_points} 3D points.")
-        results['metrics']['merged_points'] = num_merged_points
-        
-        # Step 7: Bundle adjustment
-        if config['sfm']['refine_poses'] and num_merged_points > 0:
-            print("\nRunning bundle adjustment...")
-            refined_poses, refined_points, _ = run_global_ba(
-                camera_poses, 
-                matches_dict, 
-                K, 
-                iterations=20
-            )
-            points_3d = refined_points
-            
-            num_refined_points = len(refined_points)
-            print(f"Bundle adjustment complete with {num_refined_points} refined points.")
-            results['metrics']['refined_points'] = num_refined_points
-        
-        # Step 8: Visualize and save sparse point cloud
-        if len(points_3d) > 0:
-            points_array = np.array(points_3d)
-            
-            # Assign random colors for visualization
-            np.random.seed(42)  # For reproducibility
-            colors = np.random.rand(len(points_array), 3)
-            
-            # Visualize sparse point cloud
-            if len(points_3d) > 0:
-                points_array = np.array(points_3d)
-                
-                # Assign random colors for visualization
-                np.random.seed(42)  # For reproducibility
-                colors = np.random.rand(len(points_array), 3)
-                
-                # Save sparse point cloud as PLY
-                sparse_cloud_file = os.path.join(config_output_dir, f"sparse_cloud_{param_filename}.ply")
-                pcd = o3d.geometry.PointCloud()
-                pcd.points = o3d.utility.Vector3dVector(points_array)
-                pcd.colors = o3d.utility.Vector3dVector(colors)
-                o3d.io.write_point_cloud(sparse_cloud_file, pcd)
-                print(f"Saved sparse point cloud to {sparse_cloud_file}")
-                
-                results['metrics']['point_cloud_file'] = sparse_cloud_file
-        
-        # Record end time and duration
-        end_time = time.time()
-        duration = end_time - start_time
-        results['duration_seconds'] = duration
-        results['end_time'] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
-        print(f"\nConfiguration {config_id} completed in {duration:.2f} seconds")
-        print(f"Points triangulated: {num_triangulated_points}")
-        
-        # Calculate a simple quality score (could be refined based on your specific needs)
-        quality_score = num_merged_points * (num_camera_poses / len(black_images))
-        results['quality_score'] = quality_score
-        print(f"Quality score: {quality_score:.2f}")
-        
         return results
         
     except Exception as e:
