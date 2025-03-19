@@ -194,9 +194,12 @@ def perform_bundle_adjustment(camera_poses, points_3d, point_observations, K, it
         jac_sparsity=A,
         verbose=2,
         x_scale='jac',
-        ftol=1e-4,
+        ftol=1e-8,        # Lower tolerance (was 1e-4)
         method='trf',
-        max_nfev=iterations
+        max_nfev=iterations,
+        loss='cauchy',    # Robust loss function
+        f_scale=5.0,      # Threshold for outlier treatment
+        tr_solver='exact' # More accurate but slower solver
     )
     
     # Extract optimized parameters
