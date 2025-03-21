@@ -194,12 +194,14 @@ def perform_bundle_adjustment(camera_poses, points_3d, point_observations, K, it
         jac_sparsity=A,
         verbose=2,
         x_scale='jac',
-        ftol=1e-8,        # Lower tolerance (was 1e-4)
+        ftol=1e-12,       # Much lower tolerance for function convergence
+        xtol=1e-10,       # Tolerance for parameter changes
+        gtol=1e-10,       # Tolerance for gradient
         method='trf',
         max_nfev=iterations,
         loss='cauchy',    # Robust loss function
-        f_scale=5.0,      # Threshold for outlier treatment
-        tr_solver='exact' # More accurate but slower solver
+        f_scale=1.0,      # Lower threshold for more accuracy (was 5.0)
+        tr_solver='lsmr'  # Compatible with sparse Jacobian
     )
     
     # Extract optimized parameters
@@ -247,6 +249,58 @@ def prepare_bundle_adjustment_data(camera_poses, feature_matches, K, min_observa
     
     # Merge points that are close to each other
     merged_points, merged_observations = merge_triangulated_points(filtered_points, filtered_observations)
+    
+    print(f"Prepared {len(merged_points)} points with at least {min_observations} observations for bundle adjustment")
+    
+    return merged_points, merged_observations
+
+def run_global_ba(camera_poses, feature_matches, K):
+    """
+    Run global bundle adjustment.
+    
+    Args:
+        camera_poses: Dictionary of camera poses {image_name: (R, t)}.
+        feature_matches: Dictionary of feature matches {(img1, img2): (kp1, kp2, matches)}.
+        K: Camera intrinsic matrix.
+        
+    Returns:
+        Refined camera poses and 3D points.
+    """
+    # Prepare data
+    points_3d, point_observations = prepare_bundle_adjustment_data(camera_poses, feature_matches, K)
+    
+    # Run bundle adjustment
+    refined_poses, refined_points = perform_bundle_adjustment(camera_poses, points_3d, point_observations, K)
+    
+    return refined_poses, refined_points, point_observations
+
+def prepare_bundle_adjustment_data(camera_poses, feature_matches, K, min_observations=2):
+    """
+    Prepare data for bundle adjustment.
+    
+    Args:
+        camera_poses: Dictionary of camera poses {image_name: (R, t)}.
+        feature_matches: Dictionary of feature matches {(img1, img2): (kp1, kp2, matches)}.
+        K: Camera intrinsic matrix.
+        min_observations: Minimum number of observations required for each point.
+        
+    Returns:
+        Tuple of (points_3d, point_observations) for bundle adjustment.
+    """
+    # Triangulate all points
+    points_3d, point_observations = triangulate_all_points(camera_poses, feature_matches, K, min_angle_deg=1.0, max_reproj_error=5.0)
+    
+    # Filter points with too few observations
+    valid_indices = []
+    for i, obs in enumerate(point_observations):
+        if len(obs) >= min_observations:
+            valid_indices.append(i)
+    
+    filtered_points = [points_3d[i] for i in valid_indices]
+    filtered_observations = [point_observations[i] for i in valid_indices]
+    
+    # Merge points that are close to each other
+    merged_points, merged_observations = merge_triangulated_points(filtered_points, filtered_observations, threshold=0.1)
     
     print(f"Prepared {len(merged_points)} points with at least {min_observations} observations for bundle adjustment")
     
