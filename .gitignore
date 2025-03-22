@@ -2,3 +2,5 @@ venv
 venv310
 results
 data/results
+.git.backup
+.git-rewrite
