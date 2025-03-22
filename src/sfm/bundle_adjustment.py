@@ -300,7 +300,7 @@ def prepare_bundle_adjustment_data(camera_poses, feature_matches, K, min_observa
     filtered_observations = [point_observations[i] for i in valid_indices]
     
     # Merge points that are close to each other
-    merged_points, merged_observations = merge_triangulated_points(filtered_points, filtered_observations, threshold=0.1)
+    merged_points, merged_observations = merge_triangulated_points(filtered_points, filtered_observations, threshold=0.05)
     
     print(f"Prepared {len(merged_points)} points with at least {min_observations} observations for bundle adjustment")
     

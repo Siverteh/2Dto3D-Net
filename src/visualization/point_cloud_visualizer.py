@@ -377,3 +377,87 @@ def create_point_cloud_animation(points, colors=None, n_frames=36, output_file=N
         fig.write_html(output_file)
     
     return fig
+
+
+def visualize_dense_point_cloud(point_cloud, window_title="3D Point Cloud Viewer", 
+                                width=1280, height=720, show_coordinate_frame=True,
+                                background_color=[1, 1, 1]):
+    """
+    Visualize a point cloud in a new window using Open3D's native visualizer.
+    This opens an external window and not inline in the notebook.
+    
+    Args:
+        point_cloud: Open3D point cloud object or NumPy array of points
+        window_title: Title for the visualization window
+        width: Width of the window in pixels
+        height: Height of the window in pixels
+        show_coordinate_frame: Whether to show the coordinate axes
+        background_color: RGB background color (each value 0-1)
+        
+    Returns:
+        None (opens visualization window)
+    """
+    import open3d as o3d
+    import numpy as np
+    
+    # Convert numpy array to Open3D point cloud if needed
+    if not isinstance(point_cloud, o3d.geometry.PointCloud):
+        # Assume it's a NumPy array
+        temp_pcd = o3d.geometry.PointCloud()
+        temp_pcd.points = o3d.utility.Vector3dVector(point_cloud)
+        point_cloud = temp_pcd
+    
+    # Check if the point cloud has colors
+    if not point_cloud.has_colors():
+        print("Point cloud has no colors. Generating random colors...")
+        # Generate random colors
+        colors = np.random.rand(len(point_cloud.points), 3)
+        point_cloud.colors = o3d.utility.Vector3dVector(colors)
+    
+    # Print stats
+    print(f"Visualizing point cloud with {len(point_cloud.points):,} points")
+    
+    # Create visualizer
+    vis = o3d.visualization.Visualizer()
+    vis.create_window(window_name=window_title, width=width, height=height)
+    
+    # Add point cloud
+    vis.add_geometry(point_cloud)
+    
+    # Add coordinate frame if requested
+    if show_coordinate_frame:
+        coordinate_frame = o3d.geometry.TriangleMesh.create_coordinate_frame(
+            size=0.5, origin=[0, 0, 0])
+        vis.add_geometry(coordinate_frame)
+    
+    # Set background color
+    opt = vis.get_render_option()
+    opt.background_color = np.asarray(background_color)
+    
+    # Set better point cloud visualization options
+    opt.point_size = 1.5
+    
+    # Set view control
+    ctrl = vis.get_view_control()
+    
+    # Set a good default viewpoint (can be adjusted in the window)
+    ctrl.set_zoom(0.8)
+    ctrl.set_front([1, 1, 1])  # Isometric view
+    ctrl.set_lookat([0, 0, 0])
+    ctrl.set_up([0, 0, 1])
+    
+    # Instructions
+    print("\nVisualization window opened!")
+    print("Controls:")
+    print("  Left-click + drag: Rotate")
+    print("  Right-click + drag: Pan")
+    print("  Mouse wheel/middle-click + drag: Zoom")
+    print("  'h': Show help message with all controls")
+    print("  '-/+': Decrease/increase point size")
+    print("  'r': Reset view")
+    print("  'c': Change background color")
+    print("  'q': Close window")
+    
+    # Run visualization
+    vis.run()
+    vis.destroy_window()

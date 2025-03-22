@@ -2,7 +2,6 @@ import cv2
 import numpy as np
 
 
-
 def match_features(desc1, desc2, ratio_threshold=0.7, method='flann'):
     """
     Match features between two images using either FLANN or brute force.
@@ -146,3 +145,59 @@ def match_image_pairs(features_dict, image_pairs=None, ratio_threshold=0.7,
             matches_dict[(img1_name, img2_name)] = (kp1, kp2, matches)
     
     return matches_dict
+
+def filter_matches_on_black_background(matches_dict, images):
+    """
+    Filter out matches where either keypoint is on a black background.
+    
+    Args:
+        matches_dict: Dictionary of matches from match_image_pairs
+        images: List of (image, filename) tuples
+        
+    Returns:
+        Filtered matches dictionary
+    """
+    # Create a mapping from filename to image for quick lookup
+    image_dict = {filename: img for img, filename in images}
+    
+    # Create masks for each image (non-black regions)
+    mask_dict = {}
+    for filename, img in image_dict.items():
+        if len(img.shape) == 3:
+            gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+        else:
+            gray = img
+        # Create binary mask - pixels with value > 15 are considered part of the dinosaur
+        _, mask = cv2.threshold(gray, 15, 255, cv2.THRESH_BINARY)
+        mask_dict[filename] = mask
+    
+    filtered_matches_dict = {}
+    
+    # For each image pair in the matches dictionary
+    for (img1_name, img2_name), (kp1, kp2, matches) in matches_dict.items():
+        mask1 = mask_dict[img1_name]
+        mask2 = mask_dict[img2_name]
+        
+        # Filter matches - keep only those where both points are on non-black areas
+        filtered_matches = []
+        for m in matches:
+            # Get keypoint coordinates (need to round to integers for mask indexing)
+            x1, y1 = int(round(kp1[m.queryIdx].pt[0])), int(round(kp1[m.queryIdx].pt[1]))
+            x2, y2 = int(round(kp2[m.trainIdx].pt[0])), int(round(kp2[m.trainIdx].pt[1]))
+            
+            # Check if coordinates are within image bounds
+            h1, w1 = mask1.shape
+            h2, w2 = mask2.shape
+            
+            if (0 <= x1 < w1 and 0 <= y1 < h1 and 0 <= x2 < w2 and 0 <= y2 < h2):
+                # Check if both points are on the dinosaur (non-black regions)
+                if mask1[y1, x1] > 0 and mask2[y2, x2] > 0:
+                    filtered_matches.append(m)
+        
+        # If we have enough matches after filtering, keep this pair
+        if len(filtered_matches) >= 8:  # Use 8 as minimum for fundamental matrix estimation
+            filtered_matches_dict[(img1_name, img2_name)] = (kp1, kp2, filtered_matches)
+            print(f"Filtered {img1_name}-{img2_name}: {len(matches)} → {len(filtered_matches)} matches")
+    
+    print(f"Filtered matches: {len(matches_dict)} pairs → {len(filtered_matches_dict)} pairs")
+    return filtered_matches_dict
